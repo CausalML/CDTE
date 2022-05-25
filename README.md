@@ -8,6 +8,7 @@ Replication code for [Robust and Agnostic Learning of Conditional Distributional
 
 * [econml](https://github.com/microsoft/EconML)
 * [doubleml](https://github.com/DoubleML/doubleml-for-py)
+* [skgarden](https://scikit-garden.github.io/)
 
 ## Replication code
 
