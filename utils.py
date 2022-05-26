@@ -304,7 +304,7 @@ class PlottingSuite:
             plugin_final_mean = np.array([self.results[n]["plugin_final_MSE"] for n in self.ns]).mean(axis=1)
             plugin_final_sd = np.array([self.results[n]["plugin_final_MSE"] for n in self.ns]).std(axis=1) / np.sqrt(self.n_iter)
             plt.plot(self.ns, plugin_final_mean, label=f"Plugin+{self.final_stage}")
-            plt.fill_between(self.ns, plugin_final_mean - plugin_final_sd, plugin_final_mean - plugin_final_sd, alpha=0.3)
+            plt.fill_between(self.ns, plugin_final_mean - plugin_final_sd, plugin_final_mean + plugin_final_sd, alpha=0.3)
             result += [(plugin_final_mean, plugin_final_sd)]
         plt.xlabel("n")
         plt.ylabel("MSE")

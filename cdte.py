@@ -36,7 +36,7 @@ class CQTE:
     
     def fit(self, X, A, Y):
         # Get folds
-        folds = list(KFold(n_splits=5, shuffle=True, random_state=self.random_state).split(X))
+        folds = list(KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state).split(X))
         # Fit propensity, quantile models, conditional densities via crossfit
         nuisances, *_ = _cdte_crossfit(self.nuisance_model, 
                           self.nested_nuisance_model, 
@@ -100,7 +100,7 @@ class CSQTE:
     def fit(self, X, A, Y):
         # TODO: check inputs
         # Get folds
-        folds = list(KFold(n_splits=5, shuffle=True, random_state=self.random_state).split(X))
+        folds = list(KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state).split(X))
         # Fit propensity, quantile models, conditional densities via crossfit
         nuisances, *_ = _cdte_crossfit(self.nuisance_model, 
                           self.nested_nuisance_model, 
