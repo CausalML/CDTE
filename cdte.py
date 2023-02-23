@@ -1,9 +1,12 @@
+import numpy as np
 from sklearn import clone
 from sklearn.model_selection import KFold
 
 from utils import (
-    _cdte_crossfit, CQTE_Nuisance_Model, 
-    CQTE_Plugin_Model, CQTE_Nested_Nuisance_Model)
+    _crossfit, _crossfit_nested, 
+    CQTE_Nuisance_Model, CQTE_Plugin_Model, CQTE_Nested_Nuisance_Model,
+    CKLTRE_Nuisance_Model, CKLTRE_Plugin_Model
+    )
 
 #####################
 # Main CDTE classes #
@@ -38,7 +41,7 @@ class CQTE:
         # Get folds
         folds = list(KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state).split(X))
         # Fit propensity, quantile models, conditional densities via crossfit
-        nuisances, *_ = _cdte_crossfit(self.nuisance_model, 
+        nuisances, *_ = _crossfit_nested(self.nuisance_model, 
                           self.nested_nuisance_model, 
                           self.nested_outcome_func,
                           folds, X, A, Y)
@@ -102,7 +105,7 @@ class CSQTE:
         # Get folds
         folds = list(KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state).split(X))
         # Fit propensity, quantile models, conditional densities via crossfit
-        nuisances, *_ = _cdte_crossfit(self.nuisance_model, 
+        nuisances, *_ = _crossfit_nested(self.nuisance_model, 
                           self.nested_nuisance_model, 
                           self.nested_outcome_func,
                           folds, X, A, Y)
@@ -137,4 +140,55 @@ class CSQTE:
             q_A_ind = (Y >= q_A)*1
             psi = nuisances[:, 4] - nuisances[:, 3] + 1/(1-self.tau)*1/(nuisances[:, 0] - 1 + A)* (
                 Y*q_A_ind - (1-self.tau)*mu_A + q_A*((1-self.tau) - q_A_ind))
+        return psi
+
+class CKLRTE:
+    def __init__(self,
+                 propensity_model,
+                 evar_model,
+                 cklrte_model,
+                 tau=0.5,
+                 proj_idx=None,
+                 min_propensity=1e-5,
+                 cv=5,
+                 random_state=None):
+        self.nuisance_model = CKLTRE_Nuisance_Model(propensity_model, evar_model)
+        self.plugin_model = CKLTRE_Plugin_Model(evar_model)
+        self.cklrte_model = cklrte_model
+        self.plugin_model_proj = clone(cklrte_model)
+        self.tau = tau
+        self.delta = -np.log(1-self.tau)
+        self.proj_idx = proj_idx
+        self.min_propensity = min_propensity
+        self.cv = cv
+        self.random_state = random_state
+        
+    def fit(self, X, A, Y):
+        if self.cv > 1:
+            # Get folds
+            folds = list(KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state).split(X))
+            # Fit propensity, quantile models, conditional densities via crossfit
+            nuisances, *_ = _crossfit(self.nuisance_model,
+                              folds, X, A, Y)
+        else:
+            nuisances = self.nuisance_model.fit(X, A, Y).predict(X)
+        # Get pseudo-outcomes
+        psi = self._get_pseudo_outcomes(X, A, Y, nuisances)
+        # Fit final regression model
+        self.cklrte_model.fit(X[:, self.proj_idx] if self.proj_idx is not None else X, psi)
+        self.plugin_model.fit(X, A, Y)
+        self.plugin_model_proj.fit(X[:, self.proj_idx] if self.proj_idx is not None else X, 
+                                   nuisances[:, 2] - nuisances[:, 1])
+        return self
+    
+    def effect(self, X):
+        return self.cklrte_model.predict(X)
+    
+    def _get_pseudo_outcomes(self, X, A, Y, nuisances):
+        evar_A = nuisances[:, 1]*(1-A) + nuisances[:, 2]*A
+        beta_A = nuisances[:, 3]*(1-A) + nuisances[:, 4]*A
+        lambda_A = nuisances[:, 5]*(1-A) + nuisances[:, 6]*A
+        m_A = self.delta*beta_A + lambda_A + beta_A*(np.exp((Y-lambda_A)/beta_A-1))
+        psi = nuisances[:, 2] - nuisances[:, 1] + 1/(nuisances[:, 0] - 1 + A)*\
+            (m_A-evar_A)
         return psi

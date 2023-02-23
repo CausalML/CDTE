@@ -1,15 +1,17 @@
+# Reproduces Figures 3 and 6 from "Robust and Agnostic Learning of Conditional Distributional Treatment Effects"
+
 import os
 import pandas as pd
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 matplotlib.use('Agg')
+from sklearn_quantile import RandomForestQuantileRegressor
 from econml.dr import DRLearner
 from econml.sklearn_extensions.linear_model import StatsModelsLinearRegression
 from doubleml.datasets import fetch_401K
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 from nuisance import ( 
-    RandomForestQuantileRegressorWrapper,
     RFKernel, KernelSuperquantileRegressor
 )
 from cdte import CSQTE
@@ -63,12 +65,12 @@ csqte_model = RandomForestRegressor(
 # Left 25% tail
 tau=0.25
 tail="left"
-quantile_model = RandomForestQuantileRegressorWrapper(n_estimators=n_estimators, 
+quantile_model = RandomForestQuantileRegressor(n_estimators=n_estimators, 
                         max_depth=max_depth, 
                         max_features=max_features, 
                         min_samples_leaf=min_samples_leaf, 
                         n_jobs=-2,
-                        tau=tau)
+                        q=tau)
 superquantile_model = KernelSuperquantileRegressor(
                         kernel=RFKernel(
                             RandomForestRegressor(
@@ -93,12 +95,12 @@ CSQTE_est_left.fit(X, A, Y)
 # Right 75% tail
 tau=0.75
 tail="right"
-quantile_model = RandomForestQuantileRegressorWrapper(n_estimators=n_estimators, 
+quantile_model = RandomForestQuantileRegressor(n_estimators=n_estimators, 
                         max_depth=max_depth, 
                         max_features=max_features, 
                         min_samples_leaf=min_samples_leaf, 
                         n_jobs=-2,
-                        tau=tau)
+                        q=tau)
 superquantile_model = KernelSuperquantileRegressor(
                         kernel=RFKernel(
                             RandomForestRegressor(
@@ -182,12 +184,12 @@ csqte_model = StatsModelsLinearRegression()
 # Left 25% tail
 tau=0.25
 tail="left"
-quantile_model = RandomForestQuantileRegressorWrapper(n_estimators=n_estimators, 
+quantile_model = RandomForestQuantileRegressor(n_estimators=n_estimators, 
                         max_depth=max_depth, 
                         max_features=max_features, 
                         min_samples_leaf=min_samples_leaf, 
                         n_jobs=-2,
-                        tau=tau)
+                        q=tau)
 superquantile_model = KernelSuperquantileRegressor(
                         kernel=RFKernel(
                             RandomForestRegressor(n_estimators=n_estimators, 
@@ -213,13 +215,13 @@ CSQTE_est_left_proj.fit(X, A, Y)
 # Right 75% tail
 tau=0.75
 tail="right"
-quantile_model = RandomForestQuantileRegressorWrapper(
+quantile_model = RandomForestQuantileRegressor(
                         n_estimators=n_estimators, 
                         max_depth=max_depth, 
                         max_features=max_features, 
                         min_samples_leaf=min_samples_leaf, 
                         n_jobs=-2,
-                                                      tau=tau)
+                        q=tau)
 superquantile_model = KernelSuperquantileRegressor(
                         kernel=RFKernel(
                             RandomForestRegressor(

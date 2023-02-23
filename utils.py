@@ -3,14 +3,14 @@ import numpy as np
 import pandas as pd
 from sklearn import clone
 from sklearn.metrics import mean_squared_error
+import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from matplotlib.pyplot import figure
 import matplotlib.pyplot as plt
-from matplotlib.ticker import AutoMinorLocator, LogLocator
-from matplotlib.ticker import ScalarFormatter
+from matplotlib.ticker import AutoMinorLocator, LogLocator, ScalarFormatter
 
-def _cdte_crossfit(model, nested_model, nested_outcome_func, folds, X, A, Y):
+def _crossfit_nested(model, nested_model, nested_outcome_func, folds, X, A, Y):
     
     model_list = []
     nested_model_list = []
@@ -35,6 +35,20 @@ def _cdte_crossfit(model, nested_model, nested_outcome_func, folds, X, A, Y):
         nuisances[test_idxs] = nuisance_temp
     return nuisances, model_list, nested_model_list
 
+def _crossfit(model, folds, X, A, Y):
+    model_list = []
+    fitted_inds = []
+
+    for idx, (train_idxs, test_idxs) in enumerate(folds):
+        model_list.append(clone(model, safe=False))
+        fitted_inds = np.concatenate((fitted_inds, test_idxs))
+        model_list[idx].fit(X[train_idxs], A[train_idxs], Y[train_idxs])
+        nuisance = model_list[idx].predict(X[test_idxs])
+        if idx == 0:
+            nuisances = np.full((X.shape[0], nuisance.shape[1]), np.nan)
+        nuisances[test_idxs] = nuisance
+    return nuisances, model_list
+
 def exp_kernel_generator(h=1):
     return lambda x: 1/h * np.exp(-x**2/h**2/2)
 
@@ -52,6 +66,7 @@ class CQTE_Nuisance_Model:
         self.propensity_model.fit(X, A)
         self.quantile_models[0].fit(X[A==0], Y[A==0])
         self.quantile_models[1].fit(X[A==1], Y[A==1])
+        return self
     
     def predict(self, X):
         predictions = np.hstack((
@@ -69,6 +84,7 @@ class CQTE_Nested_Nuisance_Model:
     def fit(self, X, A, Y):
         self.nested_models[0].fit(X[A==0], Y[A==0])
         self.nested_models[1].fit(X[A==1], Y[A==1])
+        return self
     
     def predict(self, X):
         predictions = np.hstack((
@@ -86,9 +102,50 @@ class CQTE_Plugin_Model:
     def fit(self, X, A, Y):
         self.model0.fit(X[A==0], Y[A==0])
         self.model1.fit(X[A==1], Y[A==1])
+        return self
         
     def predict(self, X):
         return self.model1.predict(X) - self.model0.predict(X)
+
+class CKLTRE_Nuisance_Model:
+    def __init__(self,
+                 propensity_model,
+                 evar_model):
+        self.propensity_model = clone(propensity_model, safe=False)
+        self.evar_models = [clone(evar_model,safe=False), clone(evar_model, safe=False)]
+    
+    def fit(self, X, A, Y):
+        self.propensity_model.fit(X, A)
+        self.evar_models[0].fit(X[A==0], Y[A==0])
+        self.evar_models[1].fit(X[A==1], Y[A==1])
+        return self
+    
+    def predict(self, X):
+        evar_preds0 = self.evar_models[0].predict(X)
+        evar_preds1 = self.evar_models[1].predict(X)
+        predictions = np.hstack((
+            self.propensity_model.predict_proba(X)[:, [1]],
+            evar_preds0[:, [0]],
+            evar_preds1[:, [0]],
+            evar_preds0[:, [1]],
+            evar_preds1[:, [1]],
+            evar_preds0[:, [2]],
+            evar_preds1[:, [2]],
+        ))
+        return predictions
+        
+class CKLTRE_Plugin_Model:
+    def __init__(self, evar_model):
+        self.model0 = clone(evar_model, safe=False)
+        self.model1 = clone(evar_model, safe=False)
+        
+    def fit(self, X, A, Y):
+        self.model0.fit(X[A==0], Y[A==0])
+        self.model1.fit(X[A==1], Y[A==1])
+        return self
+        
+    def predict(self, X):
+        return self.model1.predict(X)[:, 0] - self.model0.predict(X)[:, 0]
 
 #######################
 # Serialization utils #
@@ -96,24 +153,88 @@ class CQTE_Plugin_Model:
 CSQTE_PREDS_FNAME_TEMPLATE = "results/CSQTE_preds_n_iter_{n_iter}_n_{n}_p_{p}_tau_{tau}_tail_{tail}_nuis_{nuis}_final_stage_{final_stage}_dgp_{dgp}.csv"
 CSQTE_COEFS_FNAME_TEMPLATE = "results/CSQTE_coefs_n_iter_{n_iter}_n_{n}_p_{p}_tau_{tau}_tail_{tail}_nuis_{nuis}_final_stage_{final_stage}_dgp_{dgp}.csv"
 
+CQTE_PREDS_FNAME_TEMPLATE = "results/CQTE_preds_n_iter_{n_iter}_n_{n}_p_{p}_tau_{tau}_nuis_{nuis}_final_stage_{final_stage}_dgp_{dgp}.csv"
+CQTE_COEFS_FNAME_TEMPLATE = "results/CQTE_coefs_n_iter_{n_iter}_n_{n}_p_{p}_tau_{tau}_nuis_{nuis}_final_stage_{final_stage}_dgp_{dgp}.csv"
+
+CKLRTE_PREDS_FNAME_TEMPLATE = "results/CKLRTE_preds_n_iter_{n_iter}_n_{n}_p_{p}_tau_{tau}_nuis_{nuis}_final_stage_{final_stage}_dgp_{dgp}.csv"
+CKLRTE_COEFS_FNAME_TEMPLATE = "results/CKLRTE_coefs_n_iter_{n_iter}_n_{n}_p_{p}_tau_{tau}_nuis_{nuis}_final_stage_{final_stage}_dgp_{dgp}.csv"
+
 def write_results_to_file(trained_models, 
                           X_test, true_effects, true_coefs,
-                          n, p, tau, tail, nuis, final_stage, dgp):
+                          n, p, tau, tail, nuis, final_stage, dgp, cdte_name="CSQTE"):
     if not os.path.exists("results"):
         os.makedirs("results")
     n_iter = len(trained_models)
+    if cdte_name == "CSQTE":
+        effect_name = f"superquantile_{tail}"
+        preds_fname = CSQTE_PREDS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            tail=tail,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+        coefs_fname = CSQTE_COEFS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            tail=tail,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+    elif cdte_name == "CQTE":
+        effect_name = "quantile"
+        preds_fname = CQTE_PREDS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+        coefs_fname = CQTE_COEFS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+    elif cdte_name == "CKLRTE":
+        effect_name = "evar"
+        preds_fname = CKLRTE_PREDS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+        coefs_fname = CKLRTE_COEFS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+    else:
+         raise ValueError("'cdte_name' must be either CQTE, CSQTE or CKLRTE.")
     ##### Predictions
     preds = np.vstack(
     (np.array([trained_models[i].effect(X_test) for i in range(n_iter)]),
     np.array([trained_models[i].plugin_model.predict(X_test) for i in range(n_iter)]),
     np.array([trained_models[i].plugin_model_proj.predict(X_test) for i in range(n_iter)]),
-    true_effects[f"superquantile_{tail}"],
+    true_effects[effect_name],
     )
     )
-    mse = np.array([mean_squared_error(true_effects[f"superquantile_{tail}"], 
+    mse = np.array([mean_squared_error(true_effects[effect_name], 
         pred) for pred in preds]).reshape(-1, 1)
     model_names = np.hstack((
-        np.repeat("CSQTE", n_iter), 
+        np.repeat(cdte_name, n_iter), 
         np.repeat("plugin", n_iter), 
         np.repeat("plugin_final", n_iter),
         ["true_effect"]))
@@ -123,23 +244,14 @@ def write_results_to_file(trained_models,
         mse
     ))
     colnames = ["model"] + [f"pred{i}" for i in range(X_test.shape[0])] + ["MSE"]
-    preds_fname = CSQTE_PREDS_FNAME_TEMPLATE.format(
-        n_iter=n_iter,
-        n=n,
-        p=p,
-        tau=tau,
-        tail=tail,
-        nuis=nuis,
-        final_stage=final_stage,
-        dgp=dgp)
     pd.DataFrame(preds, columns=colnames).to_csv(preds_fname, index=False)
     ##### Coefs
     if final_stage == "OLS":
         coefs = np.hstack((
-        np.array([trained_models[i].csqte_model.coef_ for i in range(n_iter)]),
-        np.array([trained_models[i].csqte_model.coef_stderr_ for i in range(n_iter)]),
-        np.array([trained_models[i].csqte_model.coef__interval()[0] for i in range(n_iter)]),
-        np.array([trained_models[i].csqte_model.coef__interval()[1] for i in range(n_iter)])
+        np.array([getattr(trained_models[i], f"{cdte_name.lower()}_model").coef_ for i in range(n_iter)]),
+        np.array([getattr(trained_models[i], f"{cdte_name.lower()}_model").coef_stderr_ for i in range(n_iter)]),
+        np.array([getattr(trained_models[i], f"{cdte_name.lower()}_model").coef__interval()[0] for i in range(n_iter)]),
+        np.array([getattr(trained_models[i], f"{cdte_name.lower()}_model").coef__interval()[1] for i in range(n_iter)])
         ))
         coverage = [((true_coefs >= coefs[i, 2*p:3*p]) & (true_coefs <= coefs[i, 3*p:4*p]))*1
                 for i in range(n_iter)]
@@ -154,7 +266,7 @@ def write_results_to_file(trained_models,
                 for i in range(n_iter)]
         coefs_plugin = np.hstack((coefs_plugin, coverage))
         model_names = np.hstack((
-            np.repeat("CSQTE", n_iter), 
+            np.repeat(cdte_name, n_iter), 
             np.repeat("plugin", n_iter), 
             ["true_coefs"]))
         true_coef_aug = np.zeros(5*p)
@@ -163,14 +275,25 @@ def write_results_to_file(trained_models,
             model_names.reshape(-1, 1),
             np.vstack((coefs, coefs_plugin, true_coef_aug))
         ))
-
         colnames = ["model"] + \
                     [f"coef{i}" for i in range(p)] +\
                     [f"stderr{i}" for i in range(p)] +\
                     [f"coef_lower{i}" for i in range(p)] +\
                     [f"coef_upper{i}" for i in range(p)] +\
                     [f"coverage{i}" for i in range(p)]
+        pd.DataFrame(coefs, columns=colnames).to_csv(coefs_fname, index=False)
 
+def load_results_from_file(n_iter, n, p, tau, tail, nuis, final_stage, dgp, cdte_name="CSQTE"):
+    if cdte_name == "CSQTE":
+        preds_fname = CSQTE_PREDS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            tail=tail,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
         coefs_fname = CSQTE_COEFS_FNAME_TEMPLATE.format(
             n_iter=n_iter,
             n=n,
@@ -180,37 +303,52 @@ def write_results_to_file(trained_models,
             nuis=nuis,
             final_stage=final_stage,
             dgp=dgp)
-        pd.DataFrame(coefs, columns=colnames).to_csv(coefs_fname, index=False)
-
-def load_results_from_file(n_iter, n, p, tau, tail, nuis, final_stage, dgp):
-    preds_fname = CSQTE_PREDS_FNAME_TEMPLATE.format(
-        n_iter=n_iter,
-        n=n,
-        p=p,
-        tau=tau,
-        tail=tail,
-        nuis=nuis,
-        final_stage=final_stage,
-        dgp=dgp)
-    coefs_fname = CSQTE_COEFS_FNAME_TEMPLATE.format(
-        n_iter=n_iter,
-        n=n,
-        p=p,
-        tau=tau,
-        tail=tail,
-        nuis=nuis,
-        final_stage=final_stage,
-        dgp=dgp)
+    elif cdte_name == "CQTE":
+        preds_fname = CQTE_PREDS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+        coefs_fname = CQTE_COEFS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+    elif cdte_name == "CKLRTE":
+        preds_fname = CKLRTE_PREDS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+        coefs_fname = CKLRTE_COEFS_FNAME_TEMPLATE.format(
+            n_iter=n_iter,
+            n=n,
+            p=p,
+            tau=tau,
+            nuis=nuis,
+            final_stage=final_stage,
+            dgp=dgp)
+    else:
+        raise ValueError("'cdte_name' must be either CQTE, CSQTE, or CKLRTE.")
     preds = pd.read_csv(preds_fname)
     d = {
-        "CSQTE_MSE": preds[preds.model=="CSQTE"]["MSE"].values,
+        f"{cdte_name}_MSE": preds[preds.model==cdte_name]["MSE"].values,
         "plugin_MSE": preds[preds.model=="plugin"]["MSE"].values,
         "plugin_final_MSE": preds[preds.model=="plugin_final"]["MSE"].values,
         }
     if final_stage == "OLS":
         coefs = pd.read_csv(coefs_fname)
         d.update({
-            "CSQTE_coverage": coefs[coefs.model=="CSQTE"][[f"coverage{i}" for i in range(p)]].values,
+            f"{cdte_name}_coverage": coefs[coefs.model==cdte_name][[f"coverage{i}" for i in range(p)]].values,
             "plugin_coverage": coefs[coefs.model=="plugin"][[f"coverage{i}" for i in range(p)]].values
             })
     return d
@@ -224,6 +362,8 @@ def ggplot_style_log(figsize, log_y=False):
     # Give plot a gray background like ggplot.
     rcParams['font.family'] = 'sans-serif'
     rcParams['font.size'] = 16
+    rcParams['pdf.fonttype'] = 42
+    rcParams['ps.fonttype'] = 42
     ax.set_facecolor('#EBEBEB')
     # Remove border around plot.
     [ax.spines[side].set_visible(False) for side in ax.spines]
@@ -249,6 +389,8 @@ def ggplot_style_log(figsize, log_y=False):
         formatter = ScalarFormatter()
         formatter.set_scientific(False)
         axis.set_major_formatter(formatter)
+        if axis == ax.yaxis:
+            axis.set_minor_formatter(formatter)
     return ax
 
 def ggplot_style_grid(figsize):
@@ -257,6 +399,8 @@ def ggplot_style_grid(figsize):
     # Give plot a gray background like ggplot.
     rcParams['font.family'] = 'sans-serif'
     rcParams['font.size'] = 16
+    rcParams['pdf.fonttype'] = 42
+    rcParams['ps.fonttype'] = 42
     ax.set_facecolor('#EBEBEB')
     # Remove border around plot.
     [ax.spines[side].set_visible(False) for side in ax.spines]
@@ -275,24 +419,30 @@ def ggplot_style_grid(figsize):
 
 class PlottingSuite:
 
-    def __init__(self, n_iter, ns, p, tau, tail, nuis, final_stage, dgp):
+    def __init__(self, n_iter, ns, p, tau, tail, nuis, final_stage, dgp, cdte_name="CSQTE"):
         # Read data from files
         self.n_iter = n_iter
         self.ns = ns
         self.nuis = nuis
         self.final_stage = final_stage
-        self.save_prefix = f"CSQTE_n_iter_{n_iter}_p_{p}_tau_{tau}_tail_{tail}_nuis_{nuis}_final_stage_{final_stage}_dgp_{dgp}.pdf"
+        self.cdte_name = cdte_name
+        if cdte_name == "CSQTE":
+            self.save_prefix = f"CSQTE_n_iter_{n_iter}_p_{p}_tau_{tau}_tail_{tail}_nuis_{nuis}_final_stage_{final_stage}_dgp_{dgp}.pdf"
+        elif cdte_name == "CQTE" or cdte_name == "CKLRTE":
+            self.save_prefix = f"{cdte_name}_n_iter_{n_iter}_p_{p}_tau_{tau}_nuis_{nuis}_final_stage_{final_stage}_dgp_{dgp}.pdf"
+        else:
+            raise ValueError("'cdte_name' must be either CQTE, CSQTE, or CKLRTE.")
         self.results = {
-           n: load_results_from_file(n_iter, n, p, tau, tail, nuis, final_stage, dgp)
+           n: load_results_from_file(n_iter, n, p, tau, tail, nuis, final_stage, dgp, self.cdte_name)
            for n in ns
         }
     
     def plot_mse(self, show_plugin=True, show_plugin_final=True, log_yscale=False, show=True, save=False):
         figure(figsize=(6, 4), dpi=100)
-        model_mean = np.array([self.results[n]["CSQTE_MSE"] for n in self.ns]).mean(axis=1)
-        model_mean_sd = np.array([self.results[n]["CSQTE_MSE"] for n in self.ns]).std(axis=1) / np.sqrt(self.n_iter)
+        model_mean = np.array([self.results[n][f"{self.cdte_name}_MSE"] for n in self.ns]).mean(axis=1)
+        model_mean_sd = np.array([self.results[n][f"{self.cdte_name}_MSE"] for n in self.ns]).std(axis=1) / np.sqrt(self.n_iter)
         result = [(model_mean, model_mean_sd)]
-        plt.plot(self.ns, model_mean, label="CSQTE")
+        plt.plot(self.ns, model_mean, label=self.cdte_name)
         plt.fill_between(self.ns, model_mean - model_mean_sd, model_mean + model_mean_sd, alpha=0.3)
         if show_plugin:
             plugin_mean = np.array([self.results[n]["plugin_MSE"] for n in self.ns]).mean(axis=1)
@@ -323,10 +473,10 @@ class PlottingSuite:
         ns = self.ns
         if self.final_stage == "OLS":
             figure(figsize=(6, 4), dpi=100)
-            coverage_mean = np.array([self.results[n]["CSQTE_coverage"][:, coef_idx] for n in self.ns]).mean(axis=1)
-            coverage_std = np.array([self.results[n]["CSQTE_coverage"][:, coef_idx] for n in self.ns]).std(axis=1) / np.sqrt(self.n_iter)
+            coverage_mean = np.array([self.results[n][f"{self.cdte_name}_coverage"][:, coef_idx] for n in self.ns]).mean(axis=1)
+            coverage_std = np.array([self.results[n][f"{self.cdte_name}_coverage"][:, coef_idx] for n in self.ns]).std(axis=1) / np.sqrt(self.n_iter)
             result = [(coverage_mean, coverage_std)]
-            plt.plot(self.ns, coverage_mean, label="CSQTE")
+            plt.plot(self.ns, coverage_mean, label=self.cdte_name)
             plt.fill_between(self.ns, coverage_mean - coverage_std, coverage_mean + coverage_std, alpha=0.3)
             if show_plugin_final:
                 plugin_coverage_mean = np.array([self.results[n]["plugin_coverage"][:, coef_idx] for n in self.ns]).mean(axis=1)
